@@ -64,19 +64,22 @@ def get_automated_leads():
 
             if not website and phone:
                 reviews = details.get('user_ratings_total', 0)
-                lead_data = [
-                    details.get('name'),
-                    phone,
-                    niche,
-                    reviews,
-                    "HOT" if reviews >= 15 else "Cold",
-                    datetime.now().strftime("%Y-%m-%d"),
-                    f"https://www.google.com/maps/place/?q=place_id:{pid}",
-                    pid
-                ]
-                new_leads_to_add.append(lead_data)
-                print(f"Added: {details.get('name')} ({reviews} reviews)")
+                rating = details.get('rating', 0)
+                address = details.get('formatted_address', 'No Address') # Added this
 
+                # Order must match: Name, Phone, Address, Reviews, Rating, Niche, Date
+                lead_data = [
+                    details.get('name'),          # 1. Name
+                    phone,                         # 2. Phone
+                    address,                       # 3. Address
+                    reviews,                       # 4. Reviews
+                    rating,                        # 5. Rating
+                    niche,                         # 6. Niche
+                    datetime.now().strftime("%Y-%m-%d"), # 7. Date Found
+                    pid                            # 8. Place ID (for deduplication check)
+                ]
+                new_leads_to_add.append(lead_data)                
+                print(f"Added: {details.get('name')} ({reviews} reviews)")
     # 3. Save to Sheet
     if new_leads_to_add:
         sheet.append_rows(new_leads_to_add)
