@@ -2,91 +2,106 @@ import os
 import json
 import gspread
 import requests
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 
-# --- CONFIGURATION ---
-GOOGLE_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
-SERVICE_ACCOUNT_JSON = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
+# --- CONFIG ---
+# Replace this with your actual Google Sheet URL
+SHEET_URL = "https://docs.google.com/spreadsheets/d/126toOJXk07Lq_RIN_lTpo5YyoeqPx5RZdQbKEJYiOTw"
 
-# Target niches to search in Doha
-NICHES = ["clinics", "beauty salons", "gyms", "landscaping company", "nursery","cafeteria","super market","grocery store"]
-DOHA_COORDS = "25.2854,51.5310"
-RADIUS = "15000" # 15km search radius
+def send_email_notification(count):
+    sender = os.getenv("SENDER_EMAIL")
+    password = os.getenv("SENDER_PASSWORD")
+    if not sender or not password or count == 0: return
+
+    subject = f"🚀 Doha Leads: {count} New Prospects Found!"
+    body = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif;">
+        <h2 style="color: #2e7d32;">Lead Generation Report</h2>
+        <p>Your Doha Lead Machine just finished a run.</p>
+        <div style="background: #f1f8e9; padding: 15px; border-radius: 8px; border-left: 5px solid #4caf50;">
+            <b>Results:</b> {count} new leads added to your list.
+        </div>
+        <p><a href="{SHEET_URL}" style="display: inline-block; background-color: #4CAF50; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; margin-top: 15px;">Open Google Sheet</a></p>
+        <p style="font-size: 12px; color: #888;">Note: This scan used your personal API credentials.</p>
+      </body>
+    </html>
+    """
+
+    msg = MIMEMultipart()
+    msg['From'] = f"Doha Lead Bot <{sender}>"
+    msg['To'] = sender
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'html'))
+
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(sender, password)
+            server.send_message(msg)
+        print("✅ Success: Email notification sent.")
+    except Exception as e:
+        print(f"❌ Email Error: {e}")
 
 def get_automated_leads():
-    # 1. Access Google Sheet
+    # 1. AUTHENTICATION
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    SERVICE_ACCOUNT_JSON = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
     creds = ServiceAccountCredentials.from_json_keyfile_dict(SERVICE_ACCOUNT_JSON, scope)
     client = gspread.authorize(creds)
     
     try:
-        sheet = client.open("Doha Leads").sheet1
+        full_sheet = client.open("Doha Leads")
+        # 2. READ SETTINGS FROM SHEET
+        settings_tab = full_sheet.worksheet("Settings")
+        NICHES = [n.strip() for n in settings_tab.acell('B1').value.split(',')]
+        COORDS = settings_tab.acell('B2').value
+        RADIUS = settings_tab.acell('B3').value
+        
+        main_sheet = full_sheet.sheet1
     except Exception as e:
-        print(f"CRITICAL ERROR: Could not open sheet: {e}")
-        return 0
+        print(f"Sheet Error: {e}"); return 0
 
-    # Get existing Place IDs from Column H to avoid duplicates
-    existing_ids = sheet.col_values(8) 
-    new_leads_to_add = []
+    existing_ids = main_sheet.col_values(8) 
+    new_leads = []
+    google_key = os.getenv("GOOGLE_MAPS_API_KEY")
 
+    # 3. SCRAPING LOOP
     for niche in NICHES:
-        print(f"--- Searching for: {niche} ---")
-        search_url = (
-            f"https://maps.googleapis.com/maps/api/place/textsearch/json?"
-            f"query={niche}+in+Doha&location={DOHA_COORDS}&radius={RADIUS}&key={GOOGLE_API_KEY}"
-        )
-        
-        response = requests.get(search_url).json()
-        status = response.get("status")
-        results = response.get('results', [])
-        
-        print(f"Google Status: {status} | Found {len(results)} total results.")
-
-        if status == "REQUEST_DENIED":
-            print(f"Error Message: {response.get('error_message')}")
-            continue
+        search_url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?query={niche}&location={COORDS}&radius={RADIUS}&key={google_key}"
+        results = requests.get(search_url).json().get('results', [])
 
         for place in results:
             pid = place['place_id']
+            if pid in existing_ids: continue
             
-            # Skip if already in our database
-            if pid in existing_ids:
-                continue
-            
-            # Check business details
-            details_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={pid}&fields=name,formatted_phone_number,website,user_ratings_total,rating&key={GOOGLE_API_KEY}"
+            details_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={pid}&fields=name,formatted_phone_number,formatted_address,website,user_ratings_total,rating&key={google_key}"
             details = requests.get(details_url).json().get('result', {})
 
-            # LEAD FILTER: No Website + Must have a Phone Number
-            website = details.get('website')
-            phone = details.get('formatted_phone_number')
+            # Your filter: No website, has phone
+            if not details.get('website') and details.get('formatted_phone_number'):
+                new_leads.append([
+                    details.get('name'),
+                    details.get('formatted_phone_number'),
+                    details.get('formatted_address', 'N/A'),
+                    details.get('user_ratings_total', 0),
+                    details.get('rating', 0),
+                    niche,
+                    datetime.now().strftime("%Y-%m-%d"),
+                    pid
+                ])
 
-            if not website and phone:
-                reviews = details.get('user_ratings_total', 0)
-                rating = details.get('rating', 0)
-                address = details.get('formatted_address', 'No Address') # Added this
-
-                # Order must match: Name, Phone, Address, Reviews, Rating, Niche, Date
-                lead_data = [
-                    details.get('name'),          # 1. Name
-                    phone,                         # 2. Phone
-                    address,                       # 3. Address
-                    reviews,                       # 4. Reviews
-                    rating,                        # 5. Rating
-                    niche,                         # 6. Niche
-                    datetime.now().strftime("%Y-%m-%d"), # 7. Date Found
-                    pid                            # 8. Place ID (for deduplication check)
-                ]
-                new_leads_to_add.append(lead_data)                
-                print(f"Added: {details.get('name')} ({reviews} reviews)")
-    # 3. Save to Sheet
-    if new_leads_to_add:
-        sheet.append_rows(new_leads_to_add)
-        return len(new_leads_to_add)
-    
+    if new_leads:
+        main_sheet.append_rows(new_leads)
+        return len(new_leads)
     return 0
 
 if __name__ == "__main__":
     count = get_automated_leads()
-    print(f"\nFinal Result: {count} new leads added to the sheet.")
+    if count > 0:
+        send_email_notification(count)
+    else:
+        print("No new leads found today.")
