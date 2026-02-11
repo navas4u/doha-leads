@@ -5,59 +5,85 @@ import requests
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 
-# Setup
+# --- CONFIGURATION ---
 GOOGLE_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 SERVICE_ACCOUNT_JSON = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
+
+# Target niches to search in Doha
+NICHES = ["clinics", "beauty salons", "gyms", "landscaping company", "nursery","cafeteria","super market","grocery store"]
+DOHA_COORDS = "25.2854,51.5310"
+RADIUS = "15000" # 15km search radius
 
 def get_automated_leads():
     # 1. Access Google Sheet
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(SERVICE_ACCOUNT_JSON, scope)
     client = gspread.authorize(creds)
-    sheet = client.open("Doha Leads").sheet1
     
-    # 2. Get existing Place IDs to avoid duplicates
-    # We assume Column H (index 8) stores the unique Place ID
-    existing_ids = sheet.col_values(8) 
+    try:
+        sheet = client.open("Doha Leads").sheet1
+    except Exception as e:
+        print(f"CRITICAL ERROR: Could not open sheet: {e}")
+        return 0
 
+    # Get existing Place IDs from Column H to avoid duplicates
+    existing_ids = sheet.col_values(8) 
     new_leads_to_add = []
-    niches = ["clinics", "beauty salons", "gyms", "landscaping"]
-    
-    for niche in niches:
-        search_url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?query={niche}+in+Doha&key={GOOGLE_API_KEY}"
-        results = requests.get(search_url).json().get('results', [])
+
+    for niche in NICHES:
+        print(f"--- Searching for: {niche} ---")
+        search_url = (
+            f"https://maps.googleapis.com/maps/api/place/textsearch/json?"
+            f"query={niche}+in+Doha&location={DOHA_COORDS}&radius={RADIUS}&key={GOOGLE_API_KEY}"
+        )
+        
+        response = requests.get(search_url).json()
+        status = response.get("status")
+        results = response.get('results', [])
+        
+        print(f"Google Status: {status} | Found {len(results)} total results.")
+
+        if status == "REQUEST_DENIED":
+            print(f"Error Message: {response.get('error_message')}")
+            continue
 
         for place in results:
             pid = place['place_id']
             
-            # CHECK: Skip if we already have this business
+            # Skip if already in our database
             if pid in existing_ids:
                 continue
             
-            # Get details to check for website
-            details_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={pid}&fields=name,formatted_phone_number,website,user_ratings_total&key={GOOGLE_API_KEY}"
+            # Check business details
+            details_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={pid}&fields=name,formatted_phone_number,website,user_ratings_total,rating&key={GOOGLE_API_KEY}"
             details = requests.get(details_url).json().get('result', {})
 
-            if not details.get('website'):
+            # LEAD FILTER: No Website + Must have a Phone Number
+            website = details.get('website')
+            phone = details.get('formatted_phone_number')
+
+            if not website and phone:
                 reviews = details.get('user_ratings_total', 0)
                 lead_data = [
                     details.get('name'),
-                    details.get('formatted_phone_number', 'N/A'),
+                    phone,
                     niche,
                     reviews,
-                    "Hot Lead" if reviews > 20 else "Cold Lead",
+                    "HOT" if reviews >= 15 else "Cold",
                     datetime.now().strftime("%Y-%m-%d"),
                     f"https://www.google.com/maps/place/?q=place_id:{pid}",
-                    pid # This is our unique key for deduplication
+                    pid
                 ]
                 new_leads_to_add.append(lead_data)
+                print(f"Added: {details.get('name')} ({reviews} reviews)")
 
-    # 3. Batch append only the truly NEW leads
+    # 3. Save to Sheet
     if new_leads_to_add:
         sheet.append_rows(new_leads_to_add)
         return len(new_leads_to_add)
+    
     return 0
 
 if __name__ == "__main__":
     count = get_automated_leads()
-    print(f"Workflow finished. Added {count} new unique leads.")
+    print(f"\nFinal Result: {count} new leads added to the sheet.")
