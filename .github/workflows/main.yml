@@ -1,24 +1,30 @@
 name: Doha Lead Scraper
+
 on:
   schedule:
-    - cron: '0 6 * * *' # 6 AM UTC Daily
-  workflow_dispatch: # Manual run button
+    - cron: '0 6 * * *' # 6 AM UTC Daily (9 AM Doha time)
+  workflow_dispatch:   # Manual run button
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4 # Updated to latest version
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11' # Changed from 3.9 to 3.11
+          python-version: '3.11'
+          
       - name: Install dependencies
         run: pip install requests gspread oauth2client
+
       - name: Run Scraper
         env:
-          # This name on the left stays the same (what Python looks for)
+          # Lead Gen Secrets
           GOOGLE_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }} 
-          # This name on the right must match your Secret name exactly
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          
+          # Notification Secrets
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
         run: python scraper.py
