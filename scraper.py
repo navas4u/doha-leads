@@ -9,7 +9,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 
 # --- CONFIG ---
-# Replace this with your actual Google Sheet URL
 SHEET_URL = "https://docs.google.com/spreadsheets/d/126toOJXk07Lq_RIN_lTpo5YyoeqPx5RZdQbKEJYiOTw"
 
 def send_email_notification(count):
@@ -55,44 +54,64 @@ def get_automated_leads():
     
     try:
         full_sheet = client.open("Doha Leads")
-        # 2. READ SETTINGS FROM SHEET
+        
+        # 2. TARGET SHEETS BY NAME (Safe even if tabs move)
         settings_tab = full_sheet.worksheet("Settings")
+        main_sheet = full_sheet.worksheet("Leads")
+        
         NICHES = [n.strip() for n in settings_tab.acell('B1').value.split(',')]
         COORDS = settings_tab.acell('B2').value
         RADIUS = settings_tab.acell('B3').value
         
-        main_sheet = full_sheet.worksheet("Leads")
     except Exception as e:
         print(f"Sheet Error: {e}"); return 0
 
-    existing_ids = main_sheet.col_values(8) 
+    # 3. DEDUPLICATION: Get existing Phones (Col 2) and Place IDs (Col 8)
+    # Using sets for much faster lookup speeds
+    existing_phones = set(main_sheet.col_values(2))
+    existing_ids = set(main_sheet.col_values(8))
+    
     new_leads = []
     google_key = os.getenv("GOOGLE_MAPS_API_KEY")
 
-    # 3. SCRAPING LOOP
+    # 4. SCRAPING LOOP
     for niche in NICHES:
+        print(f"🔍 Searching for: {niche}...")
         search_url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?query={niche}&location={COORDS}&radius={RADIUS}&key={google_key}"
         results = requests.get(search_url).json().get('results', [])
 
         for place in results:
             pid = place['place_id']
+            
+            # Check ID duplicate
             if pid in existing_ids: continue
             
             details_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={pid}&fields=name,formatted_phone_number,formatted_address,website,user_ratings_total,rating&key={google_key}"
             details = requests.get(details_url).json().get('result', {})
 
-            # Your filter: No website, has phone
-            if not details.get('website') and details.get('formatted_phone_number'):
-                new_leads.append([
-                    details.get('name'),
-                    details.get('formatted_phone_number'),
-                    details.get('formatted_address', 'N/A'),
-                    details.get('user_ratings_total', 0),
-                    details.get('rating', 0),
-                    niche,
-                    datetime.now().strftime("%Y-%m-%d"),
-                    pid
-                ])
+            phone = details.get('formatted_phone_number')
+
+            # --- DUAL FILTER ---
+            # 1. Must have no website
+            # 2. Must have a phone
+            # 3. Phone must not already be in our sheet
+            if not details.get('website') and phone:
+                if phone not in existing_phones:
+                    lead_data = [
+                        details.get('name'),
+                        phone,
+                        details.get('formatted_address', 'N/A'),
+                        details.get('user_ratings_total', 0),
+                        details.get('rating', 0),
+                        niche,
+                        datetime.now().strftime("%Y-%m-%d"),
+                        pid
+                    ]
+                    new_leads.append(lead_data)
+                    
+                    # Add to sets to prevent duplicates WITHIN the same run
+                    existing_phones.add(phone)
+                    existing_ids.add(pid)
 
     if new_leads:
         main_sheet.append_rows(new_leads)
