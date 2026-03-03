@@ -61,7 +61,7 @@ def get_automated_leads():
         COORDS = settings_tab.acell('B2').value
         RADIUS = settings_tab.acell('B3').value
         
-        main_sheet = full_sheet.sheet1
+        main_sheet = full_sheet.worksheet("Leads")
     except Exception as e:
         print(f"Sheet Error: {e}"); return 0
 
